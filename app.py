@@ -194,6 +194,7 @@ def compare():
             if g and g[0] < len(pages2):
                 pages2[g[0]]["boxes"].append(g[1])
 
+    stats["changed_regions"] = stats["replace"] + stats["insert"] + stats["delete"]
     return jsonify({
         "file1": {"name": f1.filename, "type": kind1, "chars": len(text1)},
         "file2": {"name": f2.filename, "type": kind2, "chars": len(text2)},
