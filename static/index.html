@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kompare Dokumen — QA Diff</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #2a2f3a; --text: #e6e9ef;
+    --muted: #8b93a5; --del: #f87171; --del-bg: rgba(248,113,113,.18);
+    --ins: #34d399; --ins-bg: rgba(52,211,153,.18);
+    --rep-a: #fbbf24; --rep-a-bg: rgba(251,191,36,.16);
+    --accent: #60a5fa;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+         background: var(--bg); color: var(--text); }
+  header { padding: 18px 24px; border-bottom: 1px solid var(--border); display: flex;
+           justify-content: space-between; align-items: center; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  header p { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+  .container { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
+  .dropgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .dropzone { border: 2px dashed var(--border); border-radius: 12px; padding: 28px;
+              text-align: center; background: var(--panel); cursor: pointer;
+              transition: border-color .15s, background .15s; min-height: 140px;
+              display: flex; flex-direction: column; align-items: center;
+              justify-content: center; gap: 8px; }
+  .dropzone.drag { border-color: var(--accent); background: rgba(96,165,250,.08); }
+  .dropzone .label { font-size: 12px; color: var(--muted); text-transform: uppercase;
+                     letter-spacing: .5px; }
+  .dropzone .fname { font-size: 14px; font-weight: 600; word-break: break-all; }
+  .dropzone .hint { font-size: 12px; color: var(--muted); }
+  .dropzone .remove { font-size: 11px; color: var(--del); margin-top: 4px; }
+  .actions { display: flex; justify-content: center; margin: 20px 0; gap: 12px; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+           padding: 10px 26px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.secondary { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+  .error { color: var(--del); text-align: center; margin-bottom: 12px; font-size: 14px; }
+  .stats { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; margin-bottom: 16px; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+          padding: 8px 14px; font-size: 13px; }
+  .stat b { font-size: 16px; }
+  .verdict { text-align: center; font-size: 15px; font-weight: 700; margin-bottom: 16px; }
+  .verdict.same { color: var(--ins); }
+  .verdict.diff { color: var(--rep-a); }
+  .viewtoggle { display: flex; gap: 8px; justify-content: center; margin-bottom: 12px; }
+  .viewtoggle button { padding: 6px 14px; font-size: 12px; }
+  .viewtoggle button.active { background: var(--accent); }
+  .viewtoggle button:not(.active) { background: var(--panel); color: var(--muted);
+                                    border: 1px solid var(--border); }
+  .diff-side { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .pane { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+          overflow: hidden; }
+  .pane h3 { margin: 0; padding: 10px 14px; font-size: 13px; border-bottom: 1px solid var(--border);
+             color: var(--muted); font-weight: 600; display: flex; justify-content: space-between; }
+  .pane .body { padding: 14px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+                font-size: 13px; line-height: 1.7; white-space: pre-wrap;
+                word-break: break-word; max-height: 70vh; overflow: auto; }
+  .d-del { background: var(--del-bg); color: var(--del); border-radius: 3px; }
+  .d-ins { background: var(--ins-bg); color: var(--ins); border-radius: 3px; }
+  .d-rep { background: var(--rep-a-bg); color: var(--rep-a); border-radius: 3px; }
+  .unified .line { padding: 4px 14px; font-family: ui-monospace, Menlo, monospace;
+                   font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+  .unified .line.del { background: var(--del-bg); }
+  .unified .line.ins { background: var(--ins-bg); }
+  .unified .line.rep { background: var(--rep-a-bg); }
+  .unified .sign { color: var(--muted); margin-right: 8px; }
+  .jumpbar { text-align: center; margin-bottom: 12px; }
+  .jumpbar button { padding: 6px 12px; font-size: 12px; background: var(--panel);
+                    border: 1px solid var(--border); color: var(--muted); }
+  .loading { text-align: center; color: var(--muted); padding: 30px; font-size: 14px; }
+  @media (max-width: 800px) { .dropgrid, .diff-side { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Kompare Dokumen</h1>
+    <p>Dokumen 1 = acuan · Dokumen 2 harus sama persis (teks + tanda baca)</p>
+  </div>
+</header>
+<div class="container">
+  <div class="dropgrid">
+    <div class="dropzone" id="dz1">
+      <div class="label">Dokumen 1 — Acuan</div>
+      <div class="hint">Drag-drop · klik pilih file · atau Ctrl+V paste screenshot<br>PDF · Word (.docx) · Image (PNG/JPG) · TXT</div>
+      <input type="file" id="f1" hidden
+             accept=".pdf,.docx,.txt,.md,.csv,.html,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff">
+    </div>
+    <div class="dropzone" id="dz2">
+      <div class="label">Dokumen 2 — Dicek</div>
+      <div class="hint">Drag-drop · klik pilih file · atau Ctrl+V paste screenshot<br>PDF · Word (.docx) · Image (PNG/JPG) · TXT</div>
+      <input type="file" id="f2" hidden
+             accept=".pdf,.docx,.txt,.md,.csv,.html,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff">
+    </div>
+  </div>
+  <div class="actions">
+    <button id="compareBtn" disabled>Bandingkan</button>
+    <label style="font-size:13px;color:var(--muted);display:flex;align-items:center;gap:6px">
+      <input type="checkbox" id="normalize"> Abaikan beda spasi/enter
+    </label>
+    <button id="resetBtn" class="secondary">Reset</button>
+  </div>
+  <div class="error" id="error"></div>
+  <div id="loading" class="loading" hidden>Membaca dokumen (image/scanned PDF lewat OCR, bisa agak lama)…</div>
+  <div id="result" hidden>
+    <div class="verdict" id="verdict"></div>
+    <div class="stats" id="stats"></div>
+    <div class="jumpbar">
+      <button id="prevDiff">↑ Perbedaan sebelumnya</button>
+      <span id="diffPos" style="margin:0 10px;font-size:12px;color:var(--muted)"></span>
+      <button id="nextDiff">Perbedaan berikutnya ↓</button>
+    </div>
+    <div class="viewtoggle">
+      <button id="vSide" class="active">Side by side</button>
+      <button id="vUni">List perbedaan</button>
+    </div>
+    <div class="diff-side" id="sideView">
+      <div class="pane"><h3><span>Dokumen 1 (acuan)</span><span id="meta1"></span></h3>
+        <div class="body" id="body1"></div></div>
+      <div class="pane"><h3><span>Dokumen 2</span><span id="meta2"></span></h3>
+        <div class="body" id="body2"></div></div>
+    </div>
+    <div class="pane unified" id="uniView" hidden>
+      <h3>Hanya bagian yang berbeda (± konteks)</h3>
+      <div class="body" id="uniBody" style="padding:0"></div>
+    </div>
+  </div>
+</div>
+<script>
+const files = {1: null, 2: null};
+let diffAnchors = [], diffIdx = -1;
+
+function setupDropzone(n) {
+  const dz = document.getElementById('dz' + n), input = document.getElementById('f' + n);
+  dz.addEventListener('click', () => input.click());
+  dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag'); });
+  dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
+  dz.addEventListener('drop', e => {
+    e.preventDefault(); dz.classList.remove('drag');
+    if (e.dataTransfer.files.length) setFile(n, e.dataTransfer.files[0]);
+  });
+  input.addEventListener('change', () => { if (input.files.length) setFile(n, input.files[0]); });
+}
+let lastZone = null; // hovered/clicked zone = paste target
+function setupPaste() {
+  document.getElementById('dz1').addEventListener('mouseenter', () => lastZone = 1);
+  document.getElementById('dz1').addEventListener('click', () => { /* click still opens picker */ lastZone = 1; });
+  document.getElementById('dz2').addEventListener('mouseenter', () => lastZone = 2);
+  document.getElementById('dz2').addEventListener('click', () => lastZone = 2);
+  document.addEventListener('paste', e => {
+    const items = e.clipboardData && e.clipboardData.items || [];
+    let target = lastZone || (!files[1] ? 1 : !files[2] ? 2 : 1);
+    let used = false;
+    for (const item of items) {
+      if (item.kind === 'file') {
+        const f = item.getAsFile();
+        if (f) {
+          const ext = (f.type.split('/')[1] || 'png').replace('jpeg','jpg');
+          const named = new File([f], `paste-${Date.now()}.${ext}`, {type: f.type});
+          setFile(target, named);
+          used = true;
+          break;
+        }
+      }
+    }
+    if (!used) {
+      const txt = e.clipboardData && e.clipboardData.getData('text/plain');
+      if (txt) setFile(target, new File([txt], `paste-${Date.now()}.txt`, {type: 'text/plain'}));
+    }
+  });
+}
+function setFile(n, file) {
+  files[n] = file;
+  const dz = document.getElementById('dz' + n);
+  dz.innerHTML = `<div class="label">Dokumen ${n}</div>
+    <div class="fname">${esc(file.name)}</div>
+    <div class="hint">${(file.size/1024).toFixed(0)} KB</div>
+    <div class="remove">klik untuk ganti file</div>`;
+  document.getElementById('compareBtn').disabled = !(files[1] && files[2]);
+}
+function esc(s) {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function escAttr(s) { return esc(s); }
+
+document.getElementById('resetBtn').onclick = () => location.reload();
+document.getElementById('compareBtn').onclick = async () => {
+  const fd = new FormData();
+  fd.append('file1', files[1]); fd.append('file2', files[2]);
+  if (document.getElementById('normalize').checked) fd.append('normalize', '1');
+  document.getElementById('error').textContent = '';
+  document.getElementById('loading').hidden = false;
+  document.getElementById('result').hidden = true;
+  try {
+    const res = await fetch('/api/compare', {method: 'POST', body: fd});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Gagal membandingkan');
+    render(data);
+  } catch (e) {
+    document.getElementById('error').textContent = e.message;
+  } finally {
+    document.getElementById('loading').hidden = true;
+  }
+};
+
+function buildPane(chunks, side) {
+  const parts = [];
+  diffAnchors = [];
+  for (const c of chunks) {
+    const text = side === 'a' ? c.a : c.b;
+    if (!text) continue;
+    if (c.tag === 'equal') { parts.push(esc(text)); continue; }
+    let cls;
+    if (side === 'a') cls = (c.tag === 'replace') ? 'd-rep' : 'd-del';
+    else cls = (c.tag === 'replace') ? 'd-rep' : 'd-ins';
+    parts.push(`<span class="${cls} diffmark">${esc(text)}</span>`);
+  }
+  return parts.join('');
+}
+
+function buildUnified(chunks) {
+  const lines = [];
+  const ctx = 30; // tokens of context
+  chunks.forEach((c, i) => {
+    if (c.tag === 'equal') {
+      if (c.a.length < 80) {
+        lines.push(`<div class="line eq"><span class="sign"> </span>${esc(c.a)}</div>`);
+      } else {
+        lines.push(`<div class="line eq"><span class="sign"> </span>${esc(c.a.slice(0,60))} <i style="color:var(--muted)">…${c.a.length} kar sama…</i></div>`);
+      }
+      return;
+    }
+    if (c.a) lines.push(`<div class="line del"><span class="sign">−</span>${esc(c.a)}</div>`);
+    if (c.b) lines.push(`<div class="line ins"><span class="sign">+</span>${esc(c.b)}</div>`);
+  });
+  return lines.join('');
+}
+
+function render(data) {
+  document.getElementById('result').hidden = false;
+  const v = document.getElementById('verdict');
+  if (data.identical) {
+    v.textContent = 'IDENTIK — Dokumen 2 sama persis dengan acuan';
+    v.className = 'verdict same';
+  } else {
+    v.textContent = `BERBEDA — ${data.stats.changed_regions} bagian tidak sama`;
+    v.className = 'verdict diff';
+  }
+  document.getElementById('meta1').textContent =
+    `${data.file1.type} · ${data.file1.chars} karakter`;
+  document.getElementById('meta2').textContent =
+    `${data.file2.type} · ${data.file2.chars} karakter`;
+  document.getElementById('stats').innerHTML = `
+    <div class="stat"><b>${data.stats.changed_regions}</b> region berbeda</div>
+    <div class="stat"><b>${data.stats.replace}</b> diganti</div>
+    <div class="stat"><b>${data.stats.insert}</b> ditambah di dok 2</div>
+    <div class="stat"><b>${data.stats.delete}</b> hilang di dok 2</div>`;
+  document.getElementById('body1').innerHTML = buildPane(data.chunks, 'a');
+  document.getElementById('body2').innerHTML = buildPane(data.chunks, 'b');
+  document.getElementById('uniBody').innerHTML = buildUnified(data.chunks);
+  diffAnchors = document.querySelectorAll('#body2 .diffmark');
+  diffIdx = -1;
+  updatePos();
+}
+function updatePos() {
+  document.getElementById('diffPos').textContent =
+    diffAnchors.length ? `${Math.max(diffIdx+1,1)}/${diffAnchors.length}` : 'tidak ada';
+}
+document.getElementById('nextDiff').onclick = () => jump(1);
+document.getElementById('prevDiff').onclick = () => jump(-1);
+function jump(dir) {
+  if (!diffAnchors.length) return;
+  diffIdx = (diffIdx + dir + diffAnchors.length) % diffAnchors.length;
+  diffAnchors.forEach(a => a.style.outline = '');
+  const el = diffAnchors[diffIdx];
+  el.style.outline = '2px solid var(--accent)';
+  el.scrollIntoView({behavior: 'smooth', block: 'center'});
+  updatePos();
+}
+document.getElementById('vSide').onclick = () => toggle(true);
+document.getElementById('vUni').onclick = () => toggle(false);
+function toggle(side) {
+  document.getElementById('vSide').className = side ? 'active' : '';
+  document.getElementById('vUni').className = side ? '' : 'active';
+  document.getElementById('sideView').hidden = !side;
+  document.getElementById('uniView').hidden = side;
+}
+setupDropzone(1); setupDropzone(2); setupPaste();
+</script>
+</body>
+</html>
