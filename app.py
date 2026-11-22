@@ -41,10 +41,57 @@ def ocr_ndarray(img_array):
     return out
 
 
+def gemini_ocr(img):
+    """Vision-LLM OCR via Gemini. Returns (line_text, box) per line where box is
+    [x0,y0,x1,y1] in image pixels, or None when no key/failure."""
+    import json
+    import os
+    import urllib.request
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        return None
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, "PNG")
+    body = {
+        "contents": [{"parts": [
+            {"text": ('Transcribe ALL text in this document exactly — every word, '
+                      'number and punctuation mark must be preserved verbatim. '
+                      'Respond with JSON only: {"lines": [{"text": "...", '
+                      '"box": [ymin, xmin, ymax, xmax]}]} where box coordinates '
+                      'are normalized 0-1000 relative to image size.')},
+            {"inline_data": {"mime_type": "image/png",
+                             "data": base64.b64encode(buf.getvalue()).decode()}}]}],
+        "generationConfig": {"temperature": 0,
+                             "response_mime_type": "application/json"},
+    }
+    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+           f"gemini-3.1-flash-lite:generateContent?key={key}")
+    req = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            data = json.loads(r.read())
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        lines = json.loads(text)["lines"]
+        out = []
+        for ln in lines:
+            ymin, xmin, ymax, xmax = ln["box"]
+            out.append((ln["text"], [xmin / 1000 * img.width,
+                                     ymin / 1000 * img.height,
+                                     xmax / 1000 * img.width,
+                                     ymax / 1000 * img.height]))
+        return out
+    except Exception:
+        return None
+
+
 def ocr_pil(img):
     """OCR with 2x upscale for small images — tiny punctuation like trailing
     periods is often lost at low resolution. Boxes are mapped back to the
     original pixel space."""
+    g = gemini_ocr(img)
+    if g:
+        return g
     import numpy as np
     from PIL import Image
     img = img.convert("RGB")
