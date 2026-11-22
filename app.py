@@ -42,8 +42,21 @@ def ocr_ndarray(img_array):
 
 
 def ocr_pil(img):
+    """OCR with 2x upscale for small images — tiny punctuation like trailing
+    periods is often lost at low resolution. Boxes are mapped back to the
+    original pixel space."""
     import numpy as np
-    return ocr_ndarray(np.array(img.convert("RGB")))
+    from PIL import Image
+    img = img.convert("RGB")
+    scale = 1.0
+    if img.width < 2000:
+        scale = min(2.0, 2000.0 / img.width)
+        img = img.resize((int(img.width * scale), int(img.height * scale)),
+                         Image.LANCZOS)
+    lines = ocr_ndarray(np.array(img))
+    if scale != 1.0:
+        lines = [(t, [v / scale for v in b]) for t, b in lines]
+    return lines
 
 
 def b64_png(pil_or_bytes):
