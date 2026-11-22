@@ -74,8 +74,8 @@
   .page-wrap img { width: 100%; display: block; border: 1px solid var(--border);
                    border-radius: 6px; }
   .hl-box { position: absolute; border-radius: 2px; pointer-events: none; }
-  .hl-box.a { background: rgba(248,113,113,.35); outline: 1px solid var(--del); }
-  .hl-box.b { background: rgba(52,211,153,.35); outline: 1px solid var(--ins); }
+  .hl-box.a { background: rgba(248,113,113,.10); outline: 1.5px solid var(--del); }
+  .hl-box.b { background: rgba(52,211,153,.10); outline: 1.5px solid var(--ins); }
   .jumpbar { text-align: center; margin-bottom: 12px; }
   .jumpbar button { padding: 6px 12px; font-size: 12px; background: var(--panel);
                     border: 1px solid var(--border); color: var(--muted); }
@@ -125,6 +125,7 @@
     <div class="viewtoggle">
       <button id="vSide" class="active">Side by side</button>
       <button id="vUni">List perbedaan</button>
+      <button id="vOrig">File asli</button>
     </div>
     <div class="diff-side" id="sideView">
       <div class="pane"><h3><span>Dokumen 1 (acuan)</span><span id="meta1"></span></h3>
@@ -135,6 +136,12 @@
     <div class="pane unified" id="uniView" hidden>
       <h3>Hanya bagian yang berbeda (± konteks)</h3>
       <div class="body" id="uniBody" style="padding:0"></div>
+    </div>
+    <div class="diff-side" id="origView" hidden>
+      <div class="pane"><h3>Dokumen 1 — posisi perbedaan (merah)</h3>
+        <div class="body" id="orig1"></div></div>
+      <div class="pane"><h3>Dokumen 2 — posisi perbedaan (hijau)</h3>
+        <div class="body" id="orig2"></div></div>
     </div>
   </div>
 </div>
@@ -250,7 +257,7 @@ function buildUnified(chunks) {
 
 function buildOrigPages(pages, side) {
   if (!pages || !pages.length) return '';
-  let html = `<div class="origpages"><h4>File asli — posisi perbedaan</h4>`;
+  let html = '<div class="origpages">';
   for (const p of pages) {
     html += `<div class="page-wrap"><img src="data:image/png;base64,${p.image}">`;
     for (const b of p.boxes) {
@@ -282,10 +289,12 @@ function render(data) {
     <div class="stat"><b>${data.stats.replace}</b> diganti</div>
     <div class="stat"><b>${data.stats.insert}</b> ditambah di dok 2</div>
     <div class="stat"><b>${data.stats.delete}</b> hilang di dok 2</div>`;
-  document.getElementById('body1').innerHTML = buildPane(data.chunks, 'a')
-    + buildOrigPages(data.pages1, 'a');
-  document.getElementById('body2').innerHTML = buildPane(data.chunks, 'b')
-    + buildOrigPages(data.pages2, 'b');
+  document.getElementById('body1').innerHTML = buildPane(data.chunks, 'a');
+  document.getElementById('body2').innerHTML = buildPane(data.chunks, 'b');
+  document.getElementById('orig1').innerHTML = buildOrigPages(data.pages1, 'a')
+    || '<div style="color:var(--muted);font-size:13px;padding:10px">Format ini tidak punya posisi halaman (txt/docx).</div>';
+  document.getElementById('orig2').innerHTML = buildOrigPages(data.pages2, 'b')
+    || '<div style="color:var(--muted);font-size:13px;padding:10px">Format ini tidak punya posisi halaman (txt/docx).</div>';
   document.getElementById('uniBody').innerHTML = buildUnified(data.chunks);
   diffAnchors = document.querySelectorAll('#body2 .diffmark');
   diffIdx = -1;
@@ -306,13 +315,14 @@ function jump(dir) {
   el.scrollIntoView({behavior: 'smooth', block: 'center'});
   updatePos();
 }
-document.getElementById('vSide').onclick = () => toggle(true);
-document.getElementById('vUni').onclick = () => toggle(false);
-function toggle(side) {
-  document.getElementById('vSide').className = side ? 'active' : '';
-  document.getElementById('vUni').className = side ? '' : 'active';
-  document.getElementById('sideView').hidden = !side;
-  document.getElementById('uniView').hidden = side;
+const views = ['vSide', 'vUni', 'vOrig'];
+const viewEls = {vSide: 'sideView', vUni: 'uniView', vOrig: 'origView'};
+views.forEach(v => document.getElementById(v).onclick = () => toggle(v));
+function toggle(active) {
+  views.forEach(v => {
+    document.getElementById(v).className = v === active ? 'active' : '';
+    document.getElementById(viewEls[v]).hidden = v !== active;
+  });
 }
 setupDropzone(1); setupDropzone(2); setupPaste();
 </script>

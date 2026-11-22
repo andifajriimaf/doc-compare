@@ -115,6 +115,25 @@ def b64_png(pil_or_bytes):
     return base64.b64encode(buf.getvalue()).decode()
 
 
+def apportion_pieces(text, geom):
+    """Split a line-level box across words proportionally by character span,
+    so highlights land on the differing word instead of the whole line."""
+    out = []
+    for m in re.finditer(r"\S+|\s+", text):
+        t = m.group(0)
+        if t.isspace() or geom is None:
+            out.append((t, None))
+            continue
+        x0, y0, x1, y1 = geom[1]
+        span = x1 - x0
+        sub = [x0 + span * m.start() / len(text),
+               y0,
+               x0 + span * m.end() / len(text),
+               y1]
+        out.append((t, (geom[0], sub)))
+    return out
+
+
 def extract_pdf(file_bytes):
     """Returns (pieces, pages). pieces = [(text, box_or_None)] where box is
     (page_index, [x0,y0,x1,y1]) in rendered-image pixels."""
@@ -147,7 +166,7 @@ def extract_pdf(file_bytes):
                 for i, (text, box) in enumerate(ocr_pil(img)):
                     if i:
                         pieces.append(("\n", None))
-                    pieces.append((text, (pno, box)))
+                    pieces.extend(apportion_pieces(text, (pno, box)))
     return pieces, pages
 
 
@@ -170,7 +189,7 @@ def extract_image(file_bytes):
     for i, (text, box) in enumerate(ocr_pil(img)):
         if i:
             pieces.append(("\n", None))
-        pieces.append((text, (0, box)))
+        pieces.extend(apportion_pieces(text, (0, box)))
     return pieces, pages
 
 
