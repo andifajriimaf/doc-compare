@@ -67,6 +67,15 @@
   .unified .line.ins { background: var(--ins-bg); }
   .unified .line.rep { background: var(--rep-a-bg); }
   .unified .sign { color: var(--muted); margin-right: 8px; }
+  .origpages { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
+  .origpages h4 { margin: 0 0 8px; font-size: 11px; color: var(--muted);
+                  font-weight: 600; text-transform: uppercase; }
+  .page-wrap { position: relative; margin-bottom: 12px; }
+  .page-wrap img { width: 100%; display: block; border: 1px solid var(--border);
+                   border-radius: 6px; }
+  .hl-box { position: absolute; border-radius: 2px; pointer-events: none; }
+  .hl-box.a { background: rgba(248,113,113,.35); outline: 1px solid var(--del); }
+  .hl-box.b { background: rgba(52,211,153,.35); outline: 1px solid var(--ins); }
   .jumpbar { text-align: center; margin-bottom: 12px; }
   .jumpbar button { padding: 6px 12px; font-size: 12px; background: var(--panel);
                     border: 1px solid var(--border); color: var(--muted); }
@@ -239,6 +248,21 @@ function buildUnified(chunks) {
   return lines.join('');
 }
 
+function buildOrigPages(pages, side) {
+  if (!pages || !pages.length) return '';
+  let html = `<div class="origpages"><h4>File asli — posisi perbedaan</h4>`;
+  for (const p of pages) {
+    html += `<div class="page-wrap"><img src="data:image/png;base64,${p.image}">`;
+    for (const b of p.boxes) {
+      const l = (b[0]/p.w*100).toFixed(3), t = (b[1]/p.h*100).toFixed(3);
+      const w = ((b[2]-b[0])/p.w*100).toFixed(3), h = ((b[3]-b[1])/p.h*100).toFixed(3);
+      html += `<div class="hl-box ${side}" style="left:${l}%;top:${t}%;width:${w}%;height:${h}%"></div>`;
+    }
+    html += `</div>`;
+  }
+  return html + '</div>';
+}
+
 function render(data) {
   document.getElementById('result').hidden = false;
   const v = document.getElementById('verdict');
@@ -258,8 +282,10 @@ function render(data) {
     <div class="stat"><b>${data.stats.replace}</b> diganti</div>
     <div class="stat"><b>${data.stats.insert}</b> ditambah di dok 2</div>
     <div class="stat"><b>${data.stats.delete}</b> hilang di dok 2</div>`;
-  document.getElementById('body1').innerHTML = buildPane(data.chunks, 'a');
-  document.getElementById('body2').innerHTML = buildPane(data.chunks, 'b');
+  document.getElementById('body1').innerHTML = buildPane(data.chunks, 'a')
+    + buildOrigPages(data.pages1, 'a');
+  document.getElementById('body2').innerHTML = buildPane(data.chunks, 'b')
+    + buildOrigPages(data.pages2, 'b');
   document.getElementById('uniBody').innerHTML = buildUnified(data.chunks);
   diffAnchors = document.querySelectorAll('#body2 .diffmark');
   diffIdx = -1;

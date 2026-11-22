@@ -1,13 +1,15 @@
+import base64
 import io
 import re
 import difflib
-import unicodedata
 
 from flask import Flask, request, jsonify, send_from_directory
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 
 MAX_FILE_MB = 40
+MAX_PAGES = 30
+RENDER_DPI = 120
 app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_MB * 1024 * 1024
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
@@ -15,47 +17,78 @@ WORD_EXTS = {".docx"}
 PDF_EXTS = {".pdf"}
 TEXT_EXTS = {".txt", ".md", ".csv", ".html", ".rtf"}
 
+TOKEN_RE = re.compile(r"\w+|[^\w\s]|\s+", re.UNICODE)
+
 _ocr_engine = None
 
 
-def ocr_image(path):
+def get_ocr():
     global _ocr_engine
     if _ocr_engine is None:
         from rapidocr_onnxruntime import RapidOCR
         _ocr_engine = RapidOCR()
-    result, _ = _ocr_engine(path)
-    if not result:
-        return ""
-    return "\n".join(line[1] for line in result)
+    return _ocr_engine
+
+
+def ocr_ndarray(img_array):
+    """Returns list of (line_text, [x0,y0,x1,y1])."""
+    result, _ = get_ocr()(img_array)
+    out = []
+    for box_pts, text, _score in (result or []):
+        xs = [p[0] for p in box_pts]
+        ys = [p[1] for p in box_pts]
+        out.append((text, [min(xs), min(ys), max(xs), max(ys)]))
+    return out
+
+
+def ocr_pil(img):
+    import numpy as np
+    return ocr_ndarray(np.array(img.convert("RGB")))
+
+
+def b64_png(pil_or_bytes):
+    from PIL import Image
+    if isinstance(pil_or_bytes, bytes):
+        return base64.b64encode(pil_or_bytes).decode()
+    buf = io.BytesIO()
+    pil_or_bytes.save(buf, "PNG")
+    return base64.b64encode(buf.getvalue()).decode()
 
 
 def extract_pdf(file_bytes):
+    """Returns (pieces, pages). pieces = [(text, box_or_None)] where box is
+    (page_index, [x0,y0,x1,y1]) in rendered-image pixels."""
     import pymupdf
-    out = []
+    pieces, pages = [], []
     with pymupdf.open(stream=file_bytes, filetype="pdf") as doc:
-        for page in doc:
-            text = page.get_text("text")
-            if text.strip():
-                out.append(text)
+        for pno, page in enumerate(doc):
+            if pno >= MAX_PAGES:
+                break
+            words = page.get_text("words")
+            pix = page.get_pixmap(dpi=RENDER_DPI)
+            scale = pix.width / page.rect.width
+            pages.append({"image": b64_png(pix.tobytes("png")),
+                          "w": pix.width, "h": pix.height, "boxes": []})
+            if pieces:
+                pieces.append(("\n\n", None))
+            if words:
+                cur_line = None
+                for w in sorted(words, key=lambda w: (w[5], w[6], w[7])):
+                    line_id = (w[5], w[6])
+                    if cur_line is not None:
+                        pieces.append((" " if line_id == cur_line else "\n", None))
+                    cur_line = line_id
+                    box = [w[0] * scale, w[1] * scale, w[2] * scale, w[3] * scale]
+                    pieces.append((w[4], (pno, box)))
             else:
-                # scanned page -> OCR the rendered page
-                pix = page.get_pixmap(dpi=200)
-                out.append(ocr_image_from_bytes(pix.tobytes("png")))
-    return "\n".join(out)
-
-
-def ocr_image_from_bytes(img_bytes):
-    import numpy as np
-    from PIL import Image
-    global _ocr_engine
-    if _ocr_engine is None:
-        from rapidocr_onnxruntime import RapidOCR
-        _ocr_engine = RapidOCR()
-    img = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
-    result, _ = _ocr_engine(img)
-    if not result:
-        return ""
-    return "\n".join(line[1] for line in result)
+                # scanned page -> OCR on the rendered pixels
+                from PIL import Image
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
+                for i, (text, box) in enumerate(ocr_pil(img)):
+                    if i:
+                        pieces.append(("\n", None))
+                    pieces.append((text, (pno, box)))
+    return pieces, pages
 
 
 def extract_docx(file_bytes):
@@ -65,51 +98,50 @@ def extract_docx(file_bytes):
     for table in doc.tables:
         for row in table.rows:
             parts.append("\t".join(cell.text for cell in row.cells))
-    return "\n".join(parts)
+    return [("\n".join(parts), None)], []
 
 
-def normalize_text(t):
-    # collapse every whitespace run to a single space -> line-break/layout
-    # differences between formats don't count; punctuation still must match
-    return re.sub(r"\s+", " ", t).strip()
+def extract_image(file_bytes):
+    from PIL import Image
+    img = Image.open(io.BytesIO(file_bytes))
+    pages = [{"image": b64_png(img.convert("RGB")),
+              "w": img.width, "h": img.height, "boxes": []}]
+    pieces = []
+    for i, (text, box) in enumerate(ocr_pil(img)):
+        if i:
+            pieces.append(("\n", None))
+        pieces.append((text, (0, box)))
+    return pieces, pages
 
 
-def extract_text(filename, file_bytes):
+def extract(filename, file_bytes):
     ext = filename.lower().rsplit(".", 1)
     ext = "." + ext[-1] if len(ext) == 2 else ""
     if ext in PDF_EXTS:
-        return extract_pdf(file_bytes), "pdf"
+        return *extract_pdf(file_bytes), "pdf"
     if ext in WORD_EXTS:
-        return extract_docx(file_bytes), "word"
+        pieces, pages = extract_docx(file_bytes)
+        return pieces, pages, "word"
     if ext in TEXT_EXTS:
-        return file_bytes.decode("utf-8", errors="replace"), "text"
+        text = file_bytes.decode("utf-8", errors="replace")
+        return [(text, None)], [], "text"
     if ext in IMAGE_EXTS or not ext:
-        return ocr_image_from_bytes(file_bytes), "image (OCR)"
+        pieces, pages = extract_image(file_bytes)
+        return pieces, pages, "image (OCR)"
     raise ValueError(f"Format tidak didukung: {ext or filename}")
 
 
-TOKEN_RE = re.compile(r"\w+|[^\w\s]|\s+", re.UNICODE)
+def normalize_text(t):
+    return re.sub(r"\s+", " ", t).strip()
 
 
-def diff_texts(text1, text2):
-    """Token-level diff: every word, punctuation mark, and whitespace run
-    is a token, so punctuation differences are caught exactly."""
-    t1 = TOKEN_RE.findall(text1)
-    t2 = TOKEN_RE.findall(text2)
-    sm = difflib.SequenceMatcher(a=t1, b=t2, autojunk=False)
-    chunks = []
-    stats = {"equal": 0, "replace": 0, "insert": 0, "delete": 0}
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        stats[tag] += 1
-        chunks.append({
-            "tag": tag,
-            "a": "".join(t1[i1:i2]),
-            "b": "".join(t2[j1:j2]),
-            "a_tokens": t1[i1:i2],
-            "b_tokens": t2[j1:j2],
-        })
-    total = stats["replace"] + stats["insert"] + stats["delete"]
-    return chunks, {"changed_regions": total, **stats}
+def tokenize(pieces):
+    tokens, geom = [], []
+    for text, box in pieces:
+        for t in TOKEN_RE.findall(text):
+            tokens.append(t)
+            geom.append(box if not t.isspace() else None)
+    return tokens, geom
 
 
 @app.post("/api/compare")
@@ -119,25 +151,57 @@ def compare():
     if not f1 or not f2:
         return jsonify({"error": "Upload dua file dulu (Dokumen 1 = acuan, Dokumen 2 = yang dicek)."}), 400
     try:
-        text1, kind1 = extract_text(f1.filename, f1.read())
-        text2, kind2 = extract_text(f2.filename, f2.read())
-        if request.form.get("normalize") == "1":
-            text1 = normalize_text(text1)
-            text2 = normalize_text(text2)
+        pieces1, pages1, kind1 = extract(f1.filename, f1.read())
+        pieces2, pages2, kind2 = extract(f2.filename, f2.read())
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": f"Gagal membaca file: {e}"}), 500
 
-    chunks, stats = diff_texts(text1, text2)
+    norm = request.form.get("normalize") == "1"
+    t1, g1 = tokenize(pieces1)
+    t2, g2 = tokenize(pieces2)
+    if norm:
+        keep = [i for i, t in enumerate(t1) if not t.isspace()]
+        t1n = [t1[i] for i in keep]
+        t1n.insert(0, " ")
+        g1n = [g1[i] for i in keep]
+        g1n.insert(0, None)
+        keep2 = [i for i, t in enumerate(t2) if not t.isspace()]
+        t2n = [t2[i] for i in keep2]
+        t2n.insert(0, " ")
+        g2n = [g2[i] for i in keep2]
+        g2n.insert(0, None)
+        t1, g1, t2, g2 = t1n, g1n, t2n, g2n
+        text1 = " ".join(t for t in t1 if not t.isspace())
+        text2 = " ".join(t for t in t2 if not t.isspace())
+    else:
+        text1 = "".join(t1)
+        text2 = "".join(t2)
+
+    # run diff, collecting page boxes per side
+    sm = difflib.SequenceMatcher(a=t1, b=t2, autojunk=False)
+    chunks, stats = [], {"equal": 0, "replace": 0, "insert": 0, "delete": 0}
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        stats[tag] += 1
+        chunks.append({"tag": tag, "a": "".join(t1[i1:i2]), "b": "".join(t2[j1:j2])})
+        if tag == "equal":
+            continue
+        for g in g1[i1:i2]:
+            if g and g[0] < len(pages1):
+                pages1[g[0]]["boxes"].append(g[1])
+        for g in g2[j1:j2]:
+            if g and g[0] < len(pages2):
+                pages2[g[0]]["boxes"].append(g[1])
+
     return jsonify({
         "file1": {"name": f1.filename, "type": kind1, "chars": len(text1)},
         "file2": {"name": f2.filename, "type": kind2, "chars": len(text2)},
-        "text1": text1,
-        "text2": text2,
+        "text1": text1, "text2": text2,
         "chunks": chunks,
         "stats": stats,
         "identical": text1 == text2,
+        "pages1": pages1, "pages2": pages2,
     })
 
 
