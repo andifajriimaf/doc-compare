@@ -1,7 +1,6 @@
 flask
 pymupdf
 python-docx
-pytesseract
 pillow
 rapidocr-onnxruntime
 numpy
