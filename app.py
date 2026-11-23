@@ -2,6 +2,8 @@ import base64
 import io
 import re
 import difflib
+import os
+import threading
 
 from flask import Flask, request, jsonify, send_from_directory
 
@@ -68,9 +70,24 @@ def gemini_ocr(img):
            f"gemini-3.1-flash-lite:generateContent?key={key}")
     req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
+    import time
+    import urllib.error
+    data = None
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                data = json.loads(r.read())
+            break
+        except urllib.error.HTTPError as e:
+            # overload / rate limit is usually temporary
+            if e.code not in (429, 500, 502, 503, 504) or attempt == 3:
+                print(f"gemini_ocr: HTTP {e.code}", flush=True)
+                return None
+            time.sleep(2 * (attempt + 1))
+        except Exception as e:
+            print(f"gemini_ocr: {type(e).__name__}", flush=True)
+            return None
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            data = json.loads(r.read())
         text = data["candidates"][0]["content"]["parts"][0]["text"]
         lines = json.loads(text)["lines"]
         out = []
@@ -309,6 +326,8 @@ def ocr_pil(img):
     """Returns a list of lines, each a list of (word, [x0,y0,x1,y1])."""
     local = local_ocr(img)
     g = gemini_ocr(img)
+    if not g and os.environ.get("GEMINI_API_KEY"):
+        OCR_STATE.fallback = True
     if g:
         return snap_to_local(g, local, img) if local else [split_words(t, b) for t, b in g]
     return [split_words(t, b) for t, b in local]
@@ -403,6 +422,62 @@ def extract(filename, file_bytes):
     raise ValueError(f"Format tidak didukung: {ext or filename}")
 
 
+OCR_STATE = threading.local()
+
+PUNCT_NAMES = {
+    ".": "titik", ",": "koma", ":": "titik dua", ";": "titik koma",
+    "(": "kurung buka", ")": "kurung tutup", "\"": "tanda kutip",
+    "\u201c": "tanda kutip", "\u201d": "tanda kutip", "'": "tanda petik",
+    "-": "tanda hubung", "/": "garis miring", "?": "tanda tanya",
+    "!": "tanda seru", "&": "tanda dan",
+}
+
+
+def describe_chars(chars):
+    names = []
+    for ch in chars:
+        if ch.isspace():
+            n = "enter" if ch == "\n" else "spasi"
+        else:
+            n = f"{PUNCT_NAMES.get(ch, 'tanda')} ({ch})"
+        if n not in names:
+            names.append(n)
+    return ", ".join(names)
+
+
+def explain(tag, a, b):
+    """Plain-language description of one difference (Dok 1 = acuan)."""
+    q = lambda t: "\u00ab" + t.strip().replace("\n", " ") + "\u00bb"
+    simple = lambda t: all(not c.isalnum() for c in t)
+    if tag == "insert":
+        if simple(b):
+            return f"Dok 2 kelebihan {describe_chars(b)}, di Dok 1 tidak ada"
+        return f"Dok 2 ada tambahan teks {q(b)} yang tidak ada di Dok 1"
+    if tag == "delete":
+        if simple(a):
+            return f"Dok 2 kurang {describe_chars(a)} yang ada di Dok 1"
+        return f"Teks {q(a)} ada di Dok 1 tapi hilang di Dok 2"
+    if a.lower() == b.lower():
+        return f"Beda huruf besar/kecil: Dok 1 {q(a)}, Dok 2 {q(b)}"
+    gone, added, words = [], [], False
+    for t, i1, i2, j1, j2 in difflib.SequenceMatcher(a=a, b=b, autojunk=False).get_opcodes():
+        if t == "equal":
+            continue
+        if not simple(a[i1:i2]) or not simple(b[j1:j2]):
+            words = True
+            break
+        gone += a[i1:i2]
+        added += b[j1:j2]
+    if words:
+        return f"Teks beda: Dok 1 {q(a)}, Dok 2 {q(b)}"
+    parts = []
+    if gone:
+        parts.append(f"Dok 2 kurang {describe_chars(gone)}")
+    if added:
+        parts.append(f"Dok 2 kelebihan {describe_chars(added)}")
+    return "Kata sama, tapi " + " dan ".join(parts) + f": Dok 1 {q(a)}, Dok 2 {q(b)}"
+
+
 def normalize_text(t):
     return re.sub(r"\s+", " ", t).strip()
 
@@ -423,8 +498,11 @@ def compare():
     if not f1 or not f2:
         return jsonify({"error": "Upload dua file dulu (Dokumen 1 = acuan, Dokumen 2 = yang dicek)."}), 400
     try:
+        OCR_STATE.fallback = False
         pieces1, pages1, kind1 = extract(f1.filename, f1.read())
+        fb1, OCR_STATE.fallback = OCR_STATE.fallback, False
         pieces2, pages2, kind2 = extract(f2.filename, f2.read())
+        fb2 = OCR_STATE.fallback
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -459,6 +537,7 @@ def compare():
         chunks.append({"tag": tag, "a": "".join(t1[i1:i2]), "b": "".join(t2[j1:j2])})
         if tag == "equal":
             continue
+        chunks[-1]["note"] = explain(tag, chunks[-1]["a"], chunks[-1]["b"])
         for g in g1[i1:i2]:
             if g and g[0] < len(pages1):
                 pages1[g[0]]["boxes"].append(g[1])
@@ -475,6 +554,7 @@ def compare():
         "stats": stats,
         "identical": text1 == text2,
         "pages1": pages1, "pages2": pages2,
+        "ocr_fallback": [n for n, fb in ((1, fb1), (2, fb2)) if fb],
     })
 
 

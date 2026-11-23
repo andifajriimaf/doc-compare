@@ -66,6 +66,9 @@
   .unified .line.del { background: var(--del-bg); }
   .unified .line.ins { background: var(--ins-bg); }
   .unified .line.rep { background: var(--rep-a-bg); }
+  .unified .line.note { color: var(--rep-a); font-family: inherit; font-weight: 600; padding-top: 10px; }
+  .ocrwarn { background: var(--rep-a-bg); color: var(--rep-a); border-radius: 8px; padding: 10px 14px;
+    font-size: 13px; margin-bottom: 14px; }
   .unified .sign { color: var(--muted); margin-right: 8px; }
   .origpages { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
   .origpages h4 { margin: 0 0 8px; font-size: 11px; color: var(--muted);
@@ -115,6 +118,7 @@
   <div class="error" id="error"></div>
   <div id="loading" class="loading" hidden>Membaca dokumen (image/scanned PDF lewat OCR, bisa agak lama)…</div>
   <div id="result" hidden>
+    <div class="ocrwarn" id="ocrWarn" hidden></div>
     <div class="verdict" id="verdict"></div>
     <div class="stats" id="stats"></div>
     <div class="jumpbar">
@@ -232,14 +236,14 @@ function buildPane(chunks, side) {
     let cls;
     if (side === 'a') cls = (c.tag === 'replace') ? 'd-rep' : 'd-del';
     else cls = (c.tag === 'replace') ? 'd-rep' : 'd-ins';
-    parts.push(`<span class="${cls} diffmark">${esc(text)}</span>`);
+    parts.push(`<span class="${cls} diffmark" title="${esc(c.note || '').replace(/"/g, '&quot;')}">${esc(text)}</span>`);
   }
   return parts.join('');
 }
 
 function buildUnified(chunks) {
   const lines = [];
-  const ctx = 30; // tokens of context
+  let n = 0;
   chunks.forEach((c, i) => {
     if (c.tag === 'equal') {
       if (c.a.length < 80) {
@@ -249,6 +253,7 @@ function buildUnified(chunks) {
       }
       return;
     }
+    lines.push(`<div class="line note">${++n}. ${esc(c.note || '')}</div>`);
     if (c.a) lines.push(`<div class="line del"><span class="sign">−</span>${esc(c.a)}</div>`);
     if (c.b) lines.push(`<div class="line ins"><span class="sign">+</span>${esc(c.b)}</div>`);
   });
@@ -280,6 +285,9 @@ function render(data) {
     v.textContent = `BERBEDA — ${data.stats.changed_regions} bagian tidak sama`;
     v.className = 'verdict diff';
   }
+  const ow = document.getElementById('ocrWarn');
+  ow.hidden = !(data.ocr_fallback || []).length;
+  ow.textContent = `Perhatian: OCR akurat (Gemini) sedang gagal untuk Dokumen ${(data.ocr_fallback || []).join(' dan ')}, jadi dibaca pakai OCR cadangan yang kurang akurat (spasi/huruf bisa salah). Coba Bandingkan ulang sebentar lagi.`;
   document.getElementById('meta1').textContent =
     `${data.file1.type} · ${data.file1.chars} karakter`;
   document.getElementById('meta2').textContent =
