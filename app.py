@@ -453,6 +453,7 @@ def explain(tag, a, b):
     """Plain-language description of one difference (Dok 1 = acuan)."""
     q = lambda t: "\u00ab" + t.strip().replace("\n", " ") + "\u00bb"
     simple = lambda t: all(not c.isalnum() for c in t)
+    a, b = a.strip() or a, b.strip() or b
     if tag == "insert":
         if simple(b):
             return f"Dok 2 kelebihan {describe_chars(b)}, di Dok 1 tidak ada"
