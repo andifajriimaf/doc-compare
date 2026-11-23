@@ -461,6 +461,9 @@ def explain(tag, a, b):
         if simple(a):
             return f"Dok 2 kurang {describe_chars(a)} yang ada di Dok 1"
         return f"Teks {q(a)} ada di Dok 1 tapi hilang di Dok 2"
+    if not a.strip() and not b.strip():
+        return (f"Beda spasi/pindah baris: Dok 1 pakai {describe_chars(a)}, "
+                f"Dok 2 pakai {describe_chars(b)}")
     if a.lower() == b.lower():
         return f"Beda huruf besar/kecil: Dok 1 {q(a)}, Dok 2 {q(b)}"
     gone, added, words = [], [], False
@@ -495,6 +498,25 @@ def tokenize(pieces):
     return tokens, geom
 
 
+HEADING_RE = re.compile(r"^\s*(\d{1,3}(?:\.\d{1,3})*[.)])\s*(\S.*)$")
+
+
+def token_points(tokens):
+    """For each token, the numbered heading ("1. JUDUL") it falls under."""
+    points, cur, i = [], "", 0
+    for line in "".join(tokens).split("\n"):
+        m = HEADING_RE.match(line)
+        if m:
+            cur = f"{m.group(1)} {m.group(2).strip()}"[:90]
+        end = len(line) + 1
+        while i < len(tokens) and end > 0:
+            points.append(cur)
+            end -= len(tokens[i])
+            i += 1
+    points += [cur] * (len(tokens) - len(points))
+    return points
+
+
 @app.post("/api/compare")
 def compare():
     f1 = request.files.get("file1")
@@ -515,20 +537,26 @@ def compare():
     norm = request.form.get("normalize") == "1"
     t1, g1 = tokenize(pieces1)
     t2, g2 = tokenize(pieces2)
+    p1 = token_points(t1)
+    d1, d2 = t1, t2
     if norm:
+        sp = lambda t, i: (" " if i and t[i - 1].isspace() else "") + t[i]
+        d1 = [""] + [sp(t1, i) for i, t in enumerate(t1) if not t.isspace()]
+        d2 = [""] + [sp(t2, i) for i, t in enumerate(t2) if not t.isspace()]
         keep = [i for i, t in enumerate(t1) if not t.isspace()]
         t1n = [t1[i] for i in keep]
         t1n.insert(0, " ")
         g1n = [g1[i] for i in keep]
         g1n.insert(0, None)
+        p1 = [""] + [p1[i] for i in keep]
         keep2 = [i for i, t in enumerate(t2) if not t.isspace()]
         t2n = [t2[i] for i in keep2]
         t2n.insert(0, " ")
         g2n = [g2[i] for i in keep2]
         g2n.insert(0, None)
         t1, g1, t2, g2 = t1n, g1n, t2n, g2n
-        text1 = " ".join(t for t in t1 if not t.isspace())
-        text2 = " ".join(t for t in t2 if not t.isspace())
+        text1 = "".join(d1).strip()
+        text2 = "".join(d2).strip()
     else:
         text1 = "".join(t1)
         text2 = "".join(t2)
@@ -538,9 +566,10 @@ def compare():
     chunks, stats = [], {"equal": 0, "replace": 0, "insert": 0, "delete": 0}
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         stats[tag] += 1
-        chunks.append({"tag": tag, "a": "".join(t1[i1:i2]), "b": "".join(t2[j1:j2])})
+        chunks.append({"tag": tag, "a": "".join(d1[i1:i2]), "b": "".join(d2[j1:j2])})
         if tag == "equal":
             continue
+        chunks[-1]["point"] = p1[min(i1, len(p1) - 1)] if p1 else ""
         chunks[-1]["note"] = explain(tag, chunks[-1]["a"], chunks[-1]["b"])
         for g in g1[i1:i2]:
             if g and g[0] < len(pages1):
@@ -556,7 +585,7 @@ def compare():
         "text1": text1, "text2": text2,
         "chunks": chunks,
         "stats": stats,
-        "identical": text1 == text2,
+        "identical": stats["changed_regions"] == 0,
         "pages1": pages1, "pages2": pages2,
         "ocr_fallback": [n for n, fb in ((1, fb1), (2, fb2)) if fb],
     })
@@ -572,17 +601,14 @@ def export_xlsx():
     wb = Workbook()
     ws = wb.active
     ws.title = "Defect"
-    ws.append(["No", "Keterangan", "Teks di Dok 1 (acuan)", "Teks di Dok 2",
-               "Konteks (teks sebelumnya)"])
-    n, prev = 0, ""
+    ws.append(["No", "Poin", "Keterangan", "Teks di Dok 1 (acuan)", "Teks di Dok 2"])
+    n = 0
     for c in d.get("chunks", []):
         if c["tag"] != "equal":
             n += 1
-            ws.append([n, c.get("note", ""), c.get("a", "").strip(),
-                       c.get("b", "").strip(), " ".join(prev.split())[-60:]])
-        elif c.get("a", "").strip():
-            prev = c["a"]
-    for col, w in zip("ABCDE", (6, 60, 40, 40, 50)):
+            ws.append([n, c.get("point", ""), c.get("note", ""),
+                       c.get("a", "").strip(), c.get("b", "").strip()])
+    for col, w in zip("ABCDE", (6, 36, 60, 40, 40)):
         ws.column_dimensions[col].width = w
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")

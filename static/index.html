@@ -259,7 +259,7 @@ function buildUnified(chunks) {
       }
       return;
     }
-    lines.push(`<div class="line note">${++n}. ${esc(c.note || '')}</div>`);
+    lines.push(`<div class="line note">${++n}. ${c.point ? '[' + esc(c.point) + '] ' : ''}${esc(c.note || '')}</div>`);
     if (c.a) lines.push(`<div class="line del"><span class="sign">−</span>${esc(c.a)}</div>`);
     if (c.b) lines.push(`<div class="line ins"><span class="sign">+</span>${esc(c.b)}</div>`);
   });
