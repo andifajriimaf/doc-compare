@@ -126,6 +126,12 @@
       <span id="diffPos" style="margin:0 10px;font-size:12px;color:var(--muted)"></span>
       <button id="nextDiff">Perbedaan berikutnya ↓</button>
     </div>
+    <div class="jumpbar">
+      <input id="xlsName" value="hasil-compare" title="Nama file Excel"
+        style="padding:7px 10px;border-radius:8px;border:1px solid var(--border,#333);background:transparent;color:inherit;width:220px">
+      <span style="font-size:12px;color:var(--muted);margin:0 8px 0 4px">.xlsx</span>
+      <button id="xlsBtn">⬇ Download Excel</button>
+    </div>
     <div class="viewtoggle">
       <button id="vSide" class="active">Side by side</button>
       <button id="vUni">List perbedaan</button>
@@ -275,7 +281,22 @@ function buildOrigPages(pages, side) {
   return html + '</div>';
 }
 
+let lastData = null;
+document.getElementById('xlsBtn').onclick = async () => {
+  if (!lastData) return;
+  const name = (document.getElementById('xlsName').value.trim() || 'hasil-compare').replace(/\.xlsx$/i, '');
+  const {chunks, stats, file1, file2, identical} = lastData;
+  const res = await fetch('/api/export', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({chunks, stats, file1, file2, identical, filename: name})});
+  if (!res.ok) { alert('Gagal membuat Excel'); return; }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(await res.blob());
+  a.download = name + '.xlsx';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+};
 function render(data) {
+  lastData = data;
   document.getElementById('result').hidden = false;
   const v = document.getElementById('verdict');
   if (data.identical) {

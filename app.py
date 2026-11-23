@@ -562,6 +562,63 @@ def compare():
     })
 
 
+@app.post("/api/export")
+def export_xlsx():
+    """Excel report: one defect per row, plus a summary sheet."""
+    from flask import send_file
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    d = request.get_json(force=True)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Defect"
+    ws.append(["No", "Keterangan", "Teks di Dok 1 (acuan)", "Teks di Dok 2",
+               "Konteks (teks sebelumnya)"])
+    n, prev = 0, ""
+    for c in d.get("chunks", []):
+        if c["tag"] != "equal":
+            n += 1
+            ws.append([n, c.get("note", ""), c.get("a", "").strip(),
+                       c.get("b", "").strip(), " ".join(prev.split())[-60:]])
+        elif c.get("a", "").strip():
+            prev = c["a"]
+    for col, w in zip("ABCDE", (6, 60, 40, 40, 50)):
+        ws.column_dimensions[col].width = w
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="374151")
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.freeze_panes = "A2"
+
+    sm = wb.create_sheet("Ringkasan")
+    st = d.get("stats", {})
+    for k, v in [
+        ("Dokumen 1 (acuan)", d.get("file1", {}).get("name", "")),
+        ("Dokumen 2", d.get("file2", {}).get("name", "")),
+        ("Hasil", "IDENTIK" if d.get("identical") else "BERBEDA"),
+        ("Jumlah defect", n),
+        ("Diganti", st.get("replace", 0)),
+        ("Ditambah di Dok 2", st.get("insert", 0)),
+        ("Hilang di Dok 2", st.get("delete", 0)),
+    ]:
+        sm.append([k, v])
+    sm.column_dimensions["A"].width = 24
+    sm.column_dimensions["B"].width = 60
+    for cell in sm["A"]:
+        cell.font = Font(bold=True)
+
+    name = re.sub(r'[\\/:*?"<>|]+', "_", (d.get("filename") or "").strip()) or "hasil-compare"
+    if not name.lower().endswith(".xlsx"):
+        name += ".xlsx"
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name=name,
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
 @app.get("/")
 def index():
     return send_from_directory("static", "index.html")

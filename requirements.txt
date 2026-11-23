@@ -5,3 +5,4 @@ pytesseract
 pillow
 rapidocr-onnxruntime
 numpy
+openpyxl
