@@ -85,13 +85,10 @@ def gemini_ocr(img):
         return None
 
 
-def ocr_pil(img):
-    """OCR with 2x upscale for small images — tiny punctuation like trailing
-    periods is often lost at low resolution. Boxes are mapped back to the
-    original pixel space."""
-    g = gemini_ocr(img)
-    if g:
-        return g
+def local_ocr(img):
+    """RapidOCR with 2x upscale for small images — tiny punctuation like
+    trailing periods is often lost at low resolution. Boxes are mapped back
+    to the original pixel space."""
     import numpy as np
     from PIL import Image
     img = img.convert("RGB")
@@ -106,6 +103,73 @@ def ocr_pil(img):
     return lines
 
 
+def split_words(text, box):
+    """Split a line box across its words proportionally by character span."""
+    out = []
+    x0, y0, x1, y1 = box
+    for m in re.finditer(r"\S+", text):
+        out.append((m.group(0), [x0 + (x1 - x0) * m.start() / len(text), y0,
+                                 x0 + (x1 - x0) * m.end() / len(text), y1]))
+    return out
+
+
+def snap_to_local(g_lines, l_lines):
+    """Gemini reads text best but its boxes drift; the local detector reads
+    worse but its boxes sit on the pixels. Align both transcriptions character
+    by character and give every Gemini word the local geometry."""
+    lchars, lgeo = [], []
+    for text, (x0, y0, x1, y1) in sorted(l_lines, key=lambda l: (l[1][1], l[1][0])):
+        n = len(text)
+        for i, ch in enumerate(text):
+            if not ch.isspace():
+                lchars.append(ch.lower())
+                lgeo.append((x0 + (x1 - x0) * i / n, y0,
+                             x0 + (x1 - x0) * (i + 1) / n, y1))
+    words, gchars, owner = [], [], []
+    for li, (text, box) in enumerate(g_lines):
+        for w, wbox in split_words(text, box):
+            for ch in w:
+                gchars.append(ch.lower())
+                owner.append(len(words))
+            words.append([li, w, wbox, []])
+    sm = difflib.SequenceMatcher(None, gchars, lchars, autojunk=False)
+    for blk in sm.get_matching_blocks():
+        for k in range(blk.size):
+            words[owner[blk.a + k]][3].append(lgeo[blk.b + k])
+    lines = [[] for _ in g_lines]
+    for li, w, wbox, hits in words:
+        if len(hits) * 2 > len(w) or (hits and len(w) == 1):
+            # keep only hits on the dominant text row (a word never wraps)
+            ys = sorted(h[1] for h in hits)
+            y = ys[len(ys) // 2]
+            hits = [h for h in hits if abs(h[1] - y) < (h[3] - h[1]) * 0.6] or hits
+            wbox = [min(h[0] for h in hits), min(h[1] for h in hits),
+                    max(h[2] for h in hits), max(h[3] for h in hits)]
+        lines[li].append((w, wbox))
+    return lines
+
+
+def ocr_pil(img):
+    """Returns a list of lines, each a list of (word, [x0,y0,x1,y1])."""
+    local = local_ocr(img)
+    g = gemini_ocr(img)
+    if g:
+        return snap_to_local(g, local) if local else [split_words(t, b) for t, b in g]
+    return [split_words(t, b) for t, b in local]
+
+
+def line_pieces(lines, pno):
+    pieces = []
+    for i, words in enumerate(lines):
+        if i:
+            pieces.append(("\n", None))
+        for j, (w, box) in enumerate(words):
+            if j:
+                pieces.append((" ", None))
+            pieces.append((w, (pno, box)))
+    return pieces
+
+
 def b64_png(pil_or_bytes):
     from PIL import Image
     if isinstance(pil_or_bytes, bytes):
@@ -113,25 +177,6 @@ def b64_png(pil_or_bytes):
     buf = io.BytesIO()
     pil_or_bytes.save(buf, "PNG")
     return base64.b64encode(buf.getvalue()).decode()
-
-
-def apportion_pieces(text, geom):
-    """Split a line-level box across words proportionally by character span,
-    so highlights land on the differing word instead of the whole line."""
-    out = []
-    for m in re.finditer(r"\S+|\s+", text):
-        t = m.group(0)
-        if t.isspace() or geom is None:
-            out.append((t, None))
-            continue
-        x0, y0, x1, y1 = geom[1]
-        span = x1 - x0
-        sub = [x0 + span * m.start() / len(text),
-               y0,
-               x0 + span * m.end() / len(text),
-               y1]
-        out.append((t, (geom[0], sub)))
-    return out
 
 
 def extract_pdf(file_bytes):
@@ -163,10 +208,7 @@ def extract_pdf(file_bytes):
                 # scanned page -> OCR on the rendered pixels
                 from PIL import Image
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
-                for i, (text, box) in enumerate(ocr_pil(img)):
-                    if i:
-                        pieces.append(("\n", None))
-                    pieces.extend(apportion_pieces(text, (pno, box)))
+                pieces.extend(line_pieces(ocr_pil(img), pno))
     return pieces, pages
 
 
@@ -185,12 +227,7 @@ def extract_image(file_bytes):
     img = Image.open(io.BytesIO(file_bytes))
     pages = [{"image": b64_png(img.convert("RGB")),
               "w": img.width, "h": img.height, "boxes": []}]
-    pieces = []
-    for i, (text, box) in enumerate(ocr_pil(img)):
-        if i:
-            pieces.append(("\n", None))
-        pieces.extend(apportion_pieces(text, (0, box)))
-    return pieces, pages
+    return line_pieces(ocr_pil(img), 0), pages
 
 
 def extract(filename, file_bytes):
