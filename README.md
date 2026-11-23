@@ -1,5 +1,14 @@
 # Kompare Dokumen
 
+> **English summary:** a QA tool that compares two documents strictly. Document 1 is the
+> reference, and Document 2 must match it exactly, down to every number and punctuation mark.
+> It accepts PDF (including scanned PDFs), Word, images, and plain text, and formats can be
+> mixed. Each difference is highlighted on the original file, explained in plain words
+> (e.g. "Doc 2 is missing a period"), and can be exported to Excel as a defect list.
+> Built with Python, Flask, PyMuPDF, and OCR (Gemini with a local RapidOCR fallback).
+
+![Kompare Dokumen: differences highlighted on the original PDF files](docs/demo-original-file.png)
+
 Aplikasi QA untuk membandingkan dua dokumen secara ketat. **Dokumen 1 adalah acuan**,
 Dokumen 2 harus sama persis (teks, angka, dan tanda baca). Setiap perbedaan ditandai,
 dijelaskan, dan bisa di-export ke Excel.
@@ -23,6 +32,10 @@ Aplikasi berjalan di laptop sendiri dan dibuka lewat browser di `http://localhos
 - **Download Excel:** nama file bisa diubah. Sheet "Defect" berisi satu perbedaan per
   baris (No, Poin, Keterangan, Teks di Dok 1, Teks di Dok 2), sheet "Ringkasan" berisi
   nama file dan jumlah defect.
+
+Contoh tampilan *List perbedaan*:
+
+![List perbedaan dengan keterangan tiap defect](docs/demo-diff-list.png)
 
 ## Install
 
