@@ -113,40 +113,114 @@ def split_words(text, box):
     return out
 
 
-def snap_to_local(g_lines, l_lines):
+def char_w(ch):
+    """Rough relative glyph width in a proportional font."""
+    if ch.isspace():
+        return 0.55
+    if ch in "ilI.,:;'|!j":
+        return 0.45
+    if ch in "ftr()-\"/[]":
+        return 0.6
+    if ch in "mwMW":
+        return 1.5
+    if ch.isupper():
+        return 1.25
+    return 1.0
+
+
+def local_rows(l_lines):
+    """Group detector segments into visual text rows, left to right, and
+    expand each row to per-character geometry."""
+    rows = []
+    for text, box in sorted(l_lines, key=lambda l: (l[1][1] + l[1][3]) / 2):
+        cy, h = (box[1] + box[3]) / 2, box[3] - box[1]
+        if rows and abs(rows[-1]["cy"] - cy) < 0.5 * max(h, rows[-1]["h"]):
+            rows[-1]["segs"].append((text, box))
+        else:
+            rows.append({"cy": cy, "h": h, "segs": [(text, box)]})
+    for row in rows:
+        row["chars"], row["geo"] = [], []
+        for text, (x0, y0, x1, y1) in sorted(row["segs"], key=lambda sg: sg[1][0]):
+            widths = [char_w(ch) for ch in text]
+            total, acc = sum(widths) or 1.0, 0.0
+            for ch, cw in zip(text, widths):
+                if not ch.isspace():
+                    row["chars"].append(ch.lower())
+                    row["geo"].append((x0 + (x1 - x0) * acc / total, y0,
+                                       x0 + (x1 - x0) * (acc + cw) / total, y1))
+                acc += cw
+    return rows
+
+
+def snap_to_local(g_lines, l_lines, img_h):
     """Gemini reads text best but its boxes drift; the local detector reads
-    worse but its boxes sit on the pixels. Align both transcriptions character
-    by character and give every Gemini word the local geometry."""
-    lchars, lgeo = [], []
-    for text, (x0, y0, x1, y1) in sorted(l_lines, key=lambda l: (l[1][1], l[1][0])):
-        n = len(text)
-        for i, ch in enumerate(text):
-            if not ch.isspace():
-                lchars.append(ch.lower())
-                lgeo.append((x0 + (x1 - x0) * i / n, y0,
-                             x0 + (x1 - x0) * (i + 1) / n, y1))
-    words, gchars, owner = [], [], []
-    for li, (text, box) in enumerate(g_lines):
-        for w, wbox in split_words(text, box):
-            for ch in w:
-                gchars.append(ch.lower())
-                owner.append(len(words))
-            words.append([li, w, wbox, []])
-    sm = difflib.SequenceMatcher(None, gchars, lchars, autojunk=False)
-    for blk in sm.get_matching_blocks():
-        for k in range(blk.size):
-            words[owner[blk.a + k]][3].append(lgeo[blk.b + k])
-    lines = [[] for _ in g_lines]
-    for li, w, wbox, hits in words:
-        if len(hits) * 2 > len(w) or (hits and len(w) == 1):
-            # keep only hits on the dominant text row (a word never wraps)
-            ys = sorted(h[1] for h in hits)
-            y = ys[len(ys) // 2]
-            hits = [h for h in hits if abs(h[1] - y) < (h[3] - h[1]) * 0.6] or hits
-            wbox = [min(h[0] for h in hits), min(h[1] for h in hits),
-                    max(h[2] for h in hits), max(h[3] for h in hits)]
-        lines[li].append((w, wbox))
-    return lines
+    worse but its boxes sit on the pixels. Match every Gemini line to the
+    detector row(s) carrying the same characters and take the geometry there."""
+    rows = local_rows(l_lines)
+    lines, fits = [], []
+    for text, gbox in g_lines:
+        words = [[w, wbox, None] for w, wbox in split_words(text, gbox)]
+        gcy = (gbox[1] + gbox[3]) / 2
+        used = set()
+        for _ in range(3):  # a Gemini line may span several detector rows
+            todo = [i for i, w in enumerate(words) if w[2] is None]
+            if not todo:
+                break
+            chars, owner = [], []
+            for i in todo:
+                for ch in words[i][0]:
+                    chars.append(ch.lower())
+                    owner.append(i)
+            best = None
+            for ri, row in enumerate(rows):
+                if ri in used:
+                    continue
+                blocks = difflib.SequenceMatcher(
+                    None, chars, row["chars"], autojunk=False).get_matching_blocks()
+                score = (sum(bl.size for bl in blocks)
+                         - 2.0 * abs(row["cy"] - gcy) / img_h)
+                if best is None or score > best[0]:
+                    best = (score, ri, blocks)
+            if best is None or best[0] < 1:
+                break
+            _, ri, blocks = best
+            used.add(ri)
+            hits = {}
+            for bl in blocks:
+                for k in range(bl.size):
+                    hits.setdefault(owner[bl.a + k], []).append(rows[ri]["geo"][bl.b + k])
+            for i, hs in hits.items():
+                w = words[i][0]
+                # drop stray single-character matches far from the word
+                mid = sorted((h[0] + h[2]) / 2 for h in hs)[len(hs) // 2]
+                cw = sorted(h[2] - h[0] for h in hs)[len(hs) // 2]
+                reach = max(len(w), 2) * cw * 1.3
+                hs = [h for h in hs if abs((h[0] + h[2]) / 2 - mid) <= reach]
+                if len(hs) * 2 > len(w) or len(w) == 1:
+                    words[i][2] = [min(h[0] for h in hs), min(h[1] for h in hs),
+                                   max(h[2] for h in hs), max(h[3] for h in hs)]
+                    fits.append((words[i][1], words[i][2]))
+        lines.append(words)
+    # unmatched words: correct Gemini's box with the average drift seen on
+    # matched words (per-axis linear fit)
+    def fit(idx):
+        xs = [g[idx] for g, _ in fits]
+        ys = [l[idx] for _, l in fits]
+        n = len(xs)
+        if n < 2:
+            return 1.0, 0.0
+        mx, my = sum(xs) / n, sum(ys) / n
+        var = sum((x - mx) ** 2 for x in xs)
+        if var < 1e-6:
+            return 1.0, my - mx
+        a = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / var
+        return a, my - a * mx
+    coef = [fit(i) for i in range(4)]
+    out = []
+    for words in lines:
+        out.append([(w, snapped or [coef[i][0] * gbox[i] + coef[i][1] for i in range(4)])
+                    for w, gbox, snapped in words])
+    return out
 
 
 def ocr_pil(img):
@@ -154,7 +228,7 @@ def ocr_pil(img):
     local = local_ocr(img)
     g = gemini_ocr(img)
     if g:
-        return snap_to_local(g, local) if local else [split_words(t, b) for t, b in g]
+        return snap_to_local(g, local, img.height) if local else [split_words(t, b) for t, b in g]
     return [split_words(t, b) for t, b in local]
 
 
