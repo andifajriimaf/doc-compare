@@ -92,13 +92,17 @@ def gemini_ocr(img):
         lines = json.loads(text)["lines"]
         out = []
         for ln in lines:
-            ymin, xmin, ymax, xmax = ln["box"]
+            box = ln["box"]
+            while len(box) == 1 and isinstance(box[0], list):
+                box = box[0]
+            ymin, xmin, ymax, xmax = box
             out.append((ln["text"], [xmin / 1000 * img.width,
                                      ymin / 1000 * img.height,
                                      xmax / 1000 * img.width,
                                      ymax / 1000 * img.height]))
         return out
-    except Exception:
+    except Exception as e:
+        print(f"gemini_ocr: bad response ({type(e).__name__})", flush=True)
         return None
 
 
