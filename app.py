@@ -152,15 +152,51 @@ def local_rows(l_lines):
     return rows
 
 
-def snap_to_local(g_lines, l_lines, img_h):
+def word_spans(text):
+    """Glyph-width-weighted (start, end) fractions of each word in a line."""
+    widths = [char_w(ch) for ch in text]
+    total = sum(widths) or 1.0
+    spans = []
+    for m in re.finditer(r"\S+", text):
+        spans.append((m.group(0), sum(widths[:m.start()]) / total,
+                      sum(widths[:m.end()]) / total))
+    return spans
+
+
+def ink_bands(img, x0, x1):
+    """Vertical extents of text rows between x0 and x1, from pixel ink."""
+    import numpy as np
+    g = np.asarray(img.convert("L"), dtype=np.int16)
+    x0, x1 = max(0, int(x0)), min(g.shape[1], int(x1))
+    if x1 - x0 < 4:
+        return []
+    strip = g[:, x0:x1]
+    ink = (np.abs(strip - int(np.median(g))) > 45).mean(axis=1) > 0.01
+    bands, start = [], None
+    for y, on in enumerate(list(ink) + [False]):
+        if on and start is None:
+            start = y
+        elif not on and start is not None:
+            if y - start >= 4:
+                bands.append((start, y))
+            start = None
+    return bands
+
+
+def snap_to_local(g_lines, l_lines, img):
     """Gemini reads text best but its boxes drift; the local detector reads
     worse but its boxes sit on the pixels. Match every Gemini line to the
-    detector row(s) carrying the same characters and take the geometry there."""
+    detector row(s) carrying the same characters and take the geometry there.
+    Words the detector could not confirm are placed from their neighbours,
+    from an unclaimed detector row, or from the pixel rows themselves."""
     rows = local_rows(l_lines)
-    lines, fits = [], []
+    lines, fits, claimed = [], [], set()
     for text, gbox in g_lines:
-        words = [[w, wbox, None] for w, wbox in split_words(text, gbox)]
-        gcy = (gbox[1] + gbox[3]) / 2
+        gx0, gy0, gx1, gy1 = gbox
+        # [word, gemini box, snapped box, start frac, end frac]
+        words = [[w, [gx0 + (gx1 - gx0) * p0, gy0, gx0 + (gx1 - gx0) * p1, gy1],
+                  None, p0, p1] for w, p0, p1 in word_spans(text)]
+        gcy = (gy0 + gy1) / 2
         used = set()
         for _ in range(3):  # a Gemini line may span several detector rows
             todo = [i for i, w in enumerate(words) if w[2] is None]
@@ -177,13 +213,14 @@ def snap_to_local(g_lines, l_lines, img_h):
                     continue
                 blocks = difflib.SequenceMatcher(
                     None, chars, row["chars"], autojunk=False).get_matching_blocks()
-                score = (sum(bl.size for bl in blocks)
-                         - 2.0 * abs(row["cy"] - gcy) / img_h)
+                n = sum(bl.size for bl in blocks)
+                score = n - 2.0 * abs(row["cy"] - gcy) / img.height
                 if best is None or score > best[0]:
-                    best = (score, ri, blocks)
-            if best is None or best[0] < 1:
+                    best = (score, ri, blocks, n)
+            # a row sharing only a stray word with this line is not its row
+            if best is None or best[3] < 1 or best[3] < 0.4 * len(chars):
                 break
-            _, ri, blocks = best
+            _, ri, blocks, _ = best
             used.add(ri)
             hits = {}
             for bl in blocks:
@@ -200,9 +237,9 @@ def snap_to_local(g_lines, l_lines, img_h):
                     words[i][2] = [min(h[0] for h in hs), min(h[1] for h in hs),
                                    max(h[2] for h in hs), max(h[3] for h in hs)]
                     fits.append((words[i][1], words[i][2]))
+                    claimed.add(ri)
         lines.append(words)
-    # unmatched words: correct Gemini's box with the average drift seen on
-    # matched words (per-axis linear fit)
+
     def fit(idx):
         xs = [g[idx] for g, _ in fits]
         ys = [l[idx] for _, l in fits]
@@ -216,10 +253,55 @@ def snap_to_local(g_lines, l_lines, img_h):
         a = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / var
         return a, my - a * mx
     coef = [fit(i) for i in range(4)]
+
+    def drift(box):
+        return [coef[i][0] * box[i] + coef[i][1] for i in range(4)]
+
+    def row_box(row):
+        g = row["geo"]
+        return [min(c[0] for c in g), min(c[1] for c in g),
+                max(c[2] for c in g), max(c[3] for c in g)]
+
     out = []
-    for words in lines:
-        out.append([(w, snapped or [coef[i][0] * gbox[i] + coef[i][1] for i in range(4)])
-                    for w, gbox, snapped in words])
+    for (text, gbox), words in zip(g_lines, lines):
+        done = [w for w in words if w[2] is not None]
+        if done and len(done) < len(words):
+            # place the rest relative to confirmed words of the same line
+            for w in words:
+                if w[2] is not None:
+                    continue
+                ref = min(done, key=lambda d: abs(d[3] - w[3]))
+                pts = [(d[3], d[2][0]) for d in done if abs(d[2][1] - ref[2][1]) < 3]
+                pts += [(d[4], d[2][2]) for d in done if abs(d[2][1] - ref[2][1]) < 3]
+                mp = sum(p for p, _ in pts) / len(pts)
+                mx = sum(x for _, x in pts) / len(pts)
+                var = sum((p - mp) ** 2 for p, _ in pts)
+                a = sum((p - mp) * (x - mx) for p, x in pts) / var if var > 1e-9 else 0
+                if a <= 0:
+                    a = (gbox[2] - gbox[0]) * coef[0][0]
+                w[2] = [mx + a * (w[3] - mp), ref[2][1],
+                        mx + a * (w[4] - mp), ref[2][3]]
+        elif not done and words:
+            est = drift(gbox)
+            ecy = (est[1] + est[3]) / 2
+            free = [(abs(r["cy"] - ecy), ri) for ri, r in enumerate(rows)
+                    if ri not in claimed and r["geo"]
+                    and abs(r["cy"] - ecy) < 1.5 * max(r["h"], est[3] - est[1])]
+            if free:
+                ri = min(free)[1]
+                claimed.add(ri)
+                x0, y0, x1, y1 = row_box(rows[ri])
+            else:
+                x0, y0, x1, y1 = est
+                taken = [row_box(rows[ri]) for ri in claimed]
+                bands = [b for b in ink_bands(img, x0, x1)
+                         if not any(min(b[1], t[3]) - max(b[0], t[1])
+                                    > 0.5 * (b[1] - b[0]) for t in taken)]
+                if bands:
+                    y0, y1 = min(bands, key=lambda b: abs((b[0] + b[1]) / 2 - ecy))
+            for w in words:
+                w[2] = [x0 + (x1 - x0) * w[3], y0, x0 + (x1 - x0) * w[4], y1]
+        out.append([(w[0], w[2]) for w in words])
     return out
 
 
@@ -228,7 +310,7 @@ def ocr_pil(img):
     local = local_ocr(img)
     g = gemini_ocr(img)
     if g:
-        return snap_to_local(g, local, img.height) if local else [split_words(t, b) for t, b in g]
+        return snap_to_local(g, local, img) if local else [split_words(t, b) for t, b in g]
     return [split_words(t, b) for t, b in local]
 
 
